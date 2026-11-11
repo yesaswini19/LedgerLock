@@ -4,7 +4,7 @@ LedgerLine is a Node.js, Express, and PostgreSQL money-movement demo. It stores 
 
 ## Live demo
 
-URL: `<add the deployed application URL here, if available>`
+URL:https://ledgerlock-4yx2.onrender.com/
 
 The credentials below are seeded for **local development and testing only** by `scripts/seed.js`. They are predictable demo credentials: never use them for real accounts or deploy them on a public or otherwise untrusted instance. Do not seed a public deployment with these accounts.
 
