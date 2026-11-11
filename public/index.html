@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f4f7fb">
-  <title>LedgerLine | Banking</title>
+  <title>BalanceVault | Banking demo</title>
   <style>
     :root {
       color-scheme: light;
@@ -179,9 +179,9 @@
 <body>
   <main id="login" class="login-wrap">
     <section class="login-card" aria-labelledby="login-title">
-      <a class="brand" href="/" aria-label="LedgerLine home"><span class="brand-mark" aria-hidden="true">L</span>LedgerLine</a>
+      <a class="brand" href="/" aria-label="BalanceVault home"><span class="brand-mark" aria-hidden="true">B</span>BalanceVault</a>
       <p class="eyebrow">Secure banking workspace</p>
-      <h1 id="login-title">Welcome back</h1>
+      <h1 id="login-title">Sign in</h1>
       <p class="subheading">Sign in to manage your accounts and activity.</p>
       <div id="login-msg" class="notice" role="status" aria-live="polite" hidden></div>
       <form id="login-form">
@@ -195,13 +195,35 @@
         </div>
         <button id="login-button" class="button button-primary" type="submit">Sign in</button>
       </form>
-      <p class="login-hint">Sign in to view your accounts and recent activity.</p>
+      <p class="login-hint">New to BalanceVault? <a href="/register">Create an account</a>.</p>
+      <a id="login-register-link" href="/register" hidden>Register</a>
+      <p class="login-hint">Use synthetic demonstration data only.</p>
+    </section>
+  </main>
+
+  <main id="register-page" class="login-wrap" hidden>
+    <section class="login-card" aria-labelledby="register-title">
+      <a class="brand" href="/" aria-label="BalanceVault home"><span class="brand-mark" aria-hidden="true">B</span>BalanceVault</a>
+      <p class="eyebrow">Create a demonstration account</p>
+      <h1 id="register-title">Register</h1>
+      <p class="subheading">Create a holder account, then sign in to continue.</p>
+      <div id="register-msg" class="notice" role="status" aria-live="polite" hidden></div>
+      <form id="register-form">
+        <div class="field"><label for="register-name">Full name</label><input id="register-name" name="fullName" type="text" maxlength="80" autocomplete="name" required></div>
+        <div class="field"><label for="register-email">Email address</label><input id="register-email" name="email" type="email" maxlength="254" autocomplete="email" required></div>
+        <div class="field"><label for="register-password">Password</label><input id="register-password" name="password" type="password" minlength="8" maxlength="72" autocomplete="new-password" required><p class="field-hint">Use at least 8 characters and no more than 72 UTF-8 bytes.</p></div>
+        <div class="field"><label for="register-confirm-password">Confirm password</label><input id="register-confirm-password" name="confirmPassword" type="password" minlength="8" maxlength="72" autocomplete="new-password" required></div>
+        <button id="register-button" class="button button-primary" type="submit">Create account</button>
+      </form>
+      <a id="register-login-link" href="/signin" hidden>Sign in</a>
+      <p class="login-hint">Already registered? <a href="/signin">Sign in</a>.</p>
+      <p class="login-hint">Public registration creates a standard account holder.</p>
     </section>
   </main>
 
   <div id="app" hidden>
     <header class="topbar">
-      <a class="brand" href="/" aria-label="LedgerLine dashboard"><span class="brand-mark" aria-hidden="true">L</span>LedgerLine</a>
+      <a class="brand" href="/" aria-label="BalanceVault dashboard"><span class="brand-mark" aria-hidden="true">B</span>BalanceVault</a>
       <div class="topbar-actions">
         <div class="identity">
           <span id="avatar" class="avatar" aria-hidden="true"></span>
@@ -227,6 +249,10 @@
             <div><h2 id="accounts-title">Your accounts</h2><p class="panel-note">Balances and account details</p></div>
             <span id="account-count" class="count"></span>
           </div>
+          <form id="open-account-form" class="field" hidden>
+            <label for="new-account-name">Open an account</label>
+            <div class="topbar-actions"><input id="new-account-name" maxlength="60" placeholder="Account name" required><button class="button button-secondary" type="submit">Create account</button></div>
+          </form>
           <div id="accts" class="account-grid" aria-live="polite"></div>
         </section>
 
@@ -263,6 +289,12 @@
           </div>
         </section>
 
+        <section id="admin-panel" class="panel accounts-panel" hidden>
+          <div class="panel-head"><div><h2>Administration</h2><p class="panel-note">User status and recent audit events</p></div></div>
+          <h3>Registered users</h3><div id="admin-users" class="table-wrap" aria-live="polite"></div>
+          <h3>Audit events</h3><div id="admin-audit" class="table-wrap" aria-live="polite"></div>
+        </section>
+
         <section class="panel statement-panel" aria-labelledby="statement-title">
           <div class="panel-head">
             <div><h2 id="statement-title">Account statement</h2><p id="statement-note" class="panel-note">Choose Statement on an account to view activity.</p></div>
@@ -272,7 +304,7 @@
           </div>
         </section>
       </div>
-      <footer class="footer">LedgerLine · Account activity and balances are updated from your ledger.</footer>
+      <footer class="footer">BalanceVault · Synthetic account activity and balances for demonstration.</footer>
     </main>
   </div>
 
@@ -302,58 +334,114 @@
       const json = await response.json().catch(() => ({}));
       return { s: response.status, j: json, replay: response.headers.get('Idempotent-Replay') };
     }
-    function initials(email) {
-      return (email || '?').split('@')[0].split(/[._-]/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join('') || '?';
+    function initials(value) {
+      return (value || '?').split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join('') || '?';
     }
     function showLogin() {
       $('app').hidden = true;
-      $('login').hidden = false;
+      const registering = window.location.pathname === '/register';
+      $('login').hidden = registering;
+      $('register-page').hidden = !registering;
+      if (!registering && new URLSearchParams(window.location.search).get('registered') === '1') {
+        showNotice($('login-msg'), 'Registration successful. Please sign in with your new account.', 'success');
+        window.history.replaceState(null, '', '/signin');
+      }
+    }
+    async function register(event) {
+      event.preventDefault();
+      const button = $('register-button'); button.disabled = true;
+      showNotice($('register-msg'), '');
+      $('register-login-link').hidden = true;
+      try {
+        const fullName = $('register-name').value.trim();
+        const email = $('register-email').value.trim();
+        const password = $('register-password').value;
+        const confirmation = $('register-confirm-password').value;
+        if (!fullName || fullName.length > 80 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8 || new TextEncoder().encode(password).length > 72) {
+          return showNotice($('register-msg'), 'Enter your name, a valid email, and a password of at least 8 characters (maximum 72 UTF-8 bytes).', 'error');
+        }
+        if (password !== confirmation) return showNotice($('register-msg'), 'Passwords do not match. Please re-enter them.', 'error');
+        const result = await call('POST', '/auth/register', { fullName, email, password });
+        if (result.s !== 201) {
+          showNotice($('register-msg'), result.j.error?.code === 'EMAIL_TAKEN'
+            ? 'That email is already registered. Sign in or use a different email.'
+            : (result.j.error?.message || 'Registration failed. Please try again.'), 'error');
+          $('register-login-link').hidden = result.j.error?.code !== 'EMAIL_TAKEN';
+          return;
+        }
+        $('register-form').reset();
+        window.location.assign('/signin?registered=1');
+      } catch { showNotice($('register-msg'), 'Could not reach BalanceVault. Check your connection and try again.', 'error'); }
+      finally { button.disabled = false; }
     }
     function logout() {
       sessionStorage.removeItem('t');
       token = null;
       me = null;
-      showLogin();
-      $('login-form').reset();
-      showNotice($('login-msg'), '');
+      window.location.replace('/signin');
     }
     async function login(event) {
       event.preventDefault();
       const button = $('login-button');
       button.disabled = true;
       showNotice($('login-msg'), '');
+      $('login-register-link').hidden = true;
       try {
         const result = await call('POST', '/auth/login', { email: $('email').value, password: $('pw').value });
-        if (result.s !== 200) return showNotice($('login-msg'), result.j.error?.message || 'Unable to sign in. Check your details and try again.', 'error');
+        if (result.s !== 200) {
+          showNotice($('login-msg'), result.j.error?.code === 'BAD_CREDENTIALS'
+            ? 'Email or password is incorrect. If you are new, register for an account.'
+            : (result.j.error?.message || 'Unable to sign in. Check your details and try again.'), 'error');
+          $('login-register-link').hidden = result.j.error?.code !== 'BAD_CREDENTIALS';
+          return;
+        }
         token = result.j.token;
         sessionStorage.setItem('t', token);
-        await boot();
+        window.location.assign(roleHome(result.j.user.role));
       } catch {
-        showNotice($('login-msg'), 'Could not reach LedgerLine. Check your connection and try again.', 'error');
+        showNotice($('login-msg'), 'Could not reach BalanceVault. Check your connection and try again.', 'error');
       } finally {
         button.disabled = false;
       }
     }
+    function roleHome(role) {
+      if (role === 'admin') return '/admin';
+      if (role === 'auditor') return '/auditor';
+      return '/dashboard';
+    }
     async function boot() {
-      if (!token) return showLogin();
+      if (!token) {
+        if (!['/', '/signin', '/register'].includes(window.location.pathname)) window.location.replace('/signin');
+        else showLogin();
+        return;
+      }
       try {
         const result = await call('GET', '/me');
         if (result.s !== 200) return logout();
         me = result.j;
+        const destination = roleHome(me.role);
+        if (window.location.pathname !== destination) {
+          window.location.replace(destination);
+          return;
+        }
         $('login').hidden = true;
+        $('register-page').hidden = true;
         $('app').hidden = false;
-        $('who').textContent = me.email;
+        $('who').textContent = me.fullName ? `${me.fullName} · ${me.email}` : me.email;
         $('role').textContent = me.role;
-        $('avatar').textContent = initials(me.email);
+        $('avatar').textContent = initials(me.fullName || me.email);
         const canVerify = me.role === 'admin' || me.role === 'auditor';
         $('verify').hidden = !canVerify;
         $('verify-panel').hidden = !canVerify;
         $('forms').hidden = me.role === 'auditor';
+        $('open-account-form').hidden = me.role !== 'holder';
+        $('admin-panel').hidden = me.role !== 'admin';
         configureMoveTabs();
         await accounts();
+        if (me.role === 'admin') await loadAdmin();
       } catch {
         showLogin();
-        showNotice($('login-msg'), 'Could not reach LedgerLine. Check your connection and try again.', 'error');
+        showNotice($('login-msg'), 'Could not reach BalanceVault. Check your connection and try again.', 'error');
       }
     }
     function configureMoveTabs() {
@@ -406,8 +494,8 @@
         const empty = document.createElement('div');
         empty.className = 'empty-state';
         const title = document.createElement('strong');
-        title.textContent = 'No accounts yet';
-        empty.append(title, document.createTextNode('Your accounts will appear here when available.'));
+        title.textContent = me.role === 'holder' ? 'Start with your first account' : 'No accounts yet';
+        empty.append(title, document.createTextNode(me.role === 'holder' ? 'Create an account above to begin your synthetic demo.' : 'Accounts will appear here when available.'));
         cards.appendChild(empty);
       }
       for (const account of accountsList.filter((item) => item.kind !== 'external')) {
@@ -531,7 +619,7 @@
         holder.appendChild(wrapper);
       } catch {
         $('statement-note').textContent = 'Statement could not be loaded.';
-        showNotice($('msg'), 'Could not reach LedgerLine. Check your connection and try again.', 'error');
+        showNotice($('msg'), 'Could not reach BalanceVault. Check your connection and try again.', 'error');
       }
     }
     async function move(event) {
@@ -561,7 +649,7 @@
           await stmt(fromAccountId);
         }
       } catch {
-        showNotice($('msg'), 'Could not reach LedgerLine. Check your connection before trying again.', 'error');
+        showNotice($('msg'), 'Could not reach BalanceVault. Check your connection before trying again.', 'error');
       } finally {
         button.disabled = accountsList.length === 0;
       }
@@ -585,12 +673,53 @@
         }
       } catch {
         $('verify-result').className = 'inline-status error';
-        $('verify-result').textContent = 'Could not reach LedgerLine. Check your connection and try again.';
+        $('verify-result').textContent = 'Could not reach BalanceVault. Check your connection and try again.';
       } finally {
         button.disabled = false;
       }
     }
+    function renderTable(container, headers, rows) {
+      const table = document.createElement('table');
+      const thead = document.createElement('thead'); const headRow = document.createElement('tr');
+      headers.forEach((label) => { const cell = document.createElement('th'); cell.textContent = label; headRow.appendChild(cell); });
+      thead.appendChild(headRow); const tbody = document.createElement('tbody');
+      rows.forEach((values) => { const row = document.createElement('tr'); values.forEach((value) => { const cell = document.createElement('td'); if (value instanceof Node) cell.appendChild(value); else cell.textContent = String(value ?? ''); row.appendChild(cell); }); tbody.appendChild(row); });
+      if (!rows.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = headers.length; cell.textContent = 'No records yet.'; row.appendChild(cell); tbody.appendChild(row); }
+      table.append(thead, tbody); container.replaceChildren(table);
+    }
+    async function loadAdmin() {
+      try {
+        const [users, events] = await Promise.all([call('GET', '/admin/users'), call('GET', '/admin/audit-events')]);
+        if (users.s !== 200 || events.s !== 200) throw new Error('Unable to load administration data');
+        renderTable($('admin-users'), ['Full name', 'Email', 'Role', 'Status', 'Created', 'Action'], users.j.map((user) => {
+          const button = document.createElement('button'); button.className = 'button button-quiet'; button.type = 'button';
+          button.textContent = user.status === 'active' ? 'Disable' : 'Enable';
+          button.disabled = user.id === me.id && user.status === 'active';
+          button.addEventListener('click', async () => {
+            button.disabled = true;
+            const updated = await call('PATCH', `/admin/users/${user.id}/status`, { active: user.status !== 'active' });
+            if (updated.s === 200) await loadAdmin(); else { button.disabled = false; showNotice($('msg'), updated.j.error?.message || 'Could not update user.', 'error'); }
+          });
+          return [user.fullName || '—', user.email, user.role, user.status, new Date(user.createdAt).toLocaleString(), button];
+        }));
+        renderTable($('admin-audit'), ['Action', 'Actor', 'Target', 'Details', 'Time'], events.j.map((event) => [event.action,
+          event.actor?.email || 'System/unknown', event.targetId || '', JSON.stringify(event.details), new Date(event.at).toLocaleString()]));
+      } catch { showNotice($('msg'), 'Administrative data could not be loaded.', 'error'); }
+    }
+    $('open-account-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const name = $('new-account-name').value.trim();
+      if (!name || name.length > 60) return showNotice($('msg'), 'Enter an account name of 1 to 60 characters.', 'error');
+      try {
+        const result = await call('POST', '/accounts', { name });
+        if (result.s !== 201) return showNotice($('msg'), result.j.error?.message || 'Account could not be created.', 'error');
+        $('open-account-form').reset();
+        showNotice($('msg'), 'Your account is ready.', 'success');
+        await accounts();
+      } catch { showNotice($('msg'), 'Could not reach BalanceVault. Try again.', 'error'); }
+    });
     $('login-form').addEventListener('submit', login);
+    $('register-form').addEventListener('submit', register);
     $('logout').addEventListener('click', logout);
     $('move-form').addEventListener('submit', move);
     $('verify').addEventListener('click', () => $('verify-panel').scrollIntoView({ behavior: 'smooth', block: 'center' }));

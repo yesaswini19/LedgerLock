@@ -5,10 +5,24 @@
 CREATE TABLE IF NOT EXISTS users (
   id            BIGSERIAL PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE,
+  full_name     TEXT,
   password_hash TEXT NOT NULL,
   role          TEXT NOT NULL CHECK (role IN ('admin','holder','auditor')),
+  is_active     BOOLEAN NOT NULL DEFAULT TRUE,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  id          BIGSERIAL PRIMARY KEY,
+  action      TEXT NOT NULL,
+  actor_id    BIGINT REFERENCES users(id),
+  target_id   TEXT,
+  details     JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS audit_events_id_idx ON audit_events (id DESC);
 
 CREATE TABLE IF NOT EXISTS accounts (
   id         BIGSERIAL PRIMARY KEY,
@@ -93,10 +107,23 @@ $$ LANGUAGE plpgsql;
 DO $$
 DECLARE t TEXT;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['ledger_entries','transactions','attempts'] LOOP
+FOREACH t IN ARRAY ARRAY['ledger_entries','transactions','attempts','audit_events'] LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', t || '_no_mutate', t);
     EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION forbid_mutation()', t || '_no_mutate', t);
     EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', t || '_no_truncate', t);
     EXECUTE format('CREATE TRIGGER %I BEFORE TRUNCATE ON %I FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation()', t || '_no_truncate', t);
   END LOOP;
 END $$;
+
+CREATE OR REPLACE FUNCTION audit_transaction_insert() RETURNS trigger AS $$
+BEGIN
+  INSERT INTO audit_events (action, actor_id, target_id, details, created_at)
+  VALUES ('money.' || NEW.type, NEW.initiated_by, NEW.id::text,
+    jsonb_build_object('fromAccountId', NEW.from_account_id, 'toAccountId', NEW.to_account_id,
+      'amount', NEW.amount), NEW.created_at);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS transactions_audit_insert ON transactions;
+CREATE TRIGGER transactions_audit_insert AFTER INSERT ON transactions
+  FOR EACH ROW EXECUTE FUNCTION audit_transaction_insert();

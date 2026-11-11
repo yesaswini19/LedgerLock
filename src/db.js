@@ -4,8 +4,8 @@ const { Pool, types } = require('pg');
 // BIGINT -> JS number. Safe because we cap a single amount at 1e12 paise (see MAX_AMOUNT).
 types.setTypeParser(20, (v) => Number(v));
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
-pool.on('error', (e) => console.error('pg pool error', e.message));
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10, connectionTimeoutMillis: 5000 });
+pool.on('error', (e) => console.error(JSON.stringify({ level: 'error', event: 'database.pool_error', code: e.code || 'DATABASE_ERROR' })));
 
 // Runs fn inside ONE transaction on ONE connection. Any throw => ROLLBACK (nothing persists).
 async function withTx(fn, begin = 'BEGIN') {

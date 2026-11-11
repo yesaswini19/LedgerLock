@@ -38,6 +38,7 @@ const { once } = require('events');
 const crypto = require('crypto');
 const request = require('supertest');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const app = require('../src/app');
 const { pool } = require('../src/db');
 const { signToken } = require('../src/auth');
@@ -78,6 +79,68 @@ test('setup', async () => {
   await once(server, 'listening');
   api = request(server);
   admin = await mkUser('admin');
+});
+
+test('REGISTRATION and ADMIN: public signup is holder-only; admin data and audit are role protected', async () => {
+  const health = await api.get('/health');
+  assert.equal(health.status, 200);
+  assert.equal(health.headers['x-content-type-options'], 'nosniff');
+  assert.equal(health.headers['x-frame-options'], 'DENY');
+  assert.equal(health.headers['referrer-policy'], 'strict-origin-when-cross-origin');
+  assert.equal(health.headers['permissions-policy'], 'camera=(), microphone=(), geolocation=()');
+  assert.match(health.headers['content-security-policy'], /default-src 'self'/);
+  assert.match(health.headers['content-security-policy'], /object-src 'none'/);
+  assert.equal(health.headers['x-powered-by'], undefined);
+  assert.equal((await api.get('/signin')).status, 200);
+  assert.equal((await api.get('/register')).status, 200);
+  assert.equal((await api.get('/admin')).status, 200);
+  assert.equal((await api.get('/auditor')).status, 200);
+  const email = `register-${uid()}@t.test`;
+  const fullName = 'Registration Test User';
+  const password = 'Registration-Pass-123';
+  const registered = await api.post('/auth/register').send({ fullName, email, password, role: 'admin', is_active: false });
+  assert.equal(registered.status, 201);
+  assert.equal(registered.body.user.role, 'holder');
+  assert.equal(registered.body.user.fullName, fullName);
+  assert.equal('token' in registered.body, false, 'registration does not sign the user in');
+  const stored = (await pool.query('SELECT password_hash FROM users WHERE id=$1', [registered.body.user.id])).rows[0];
+  assert.equal(await bcrypt.compare(password, stored.password_hash), true);
+  assert.equal((await api.post('/auth/register').send({ fullName: 'Duplicate User', email, password })).status, 409);
+  assert.equal((await api.post('/auth/register').send({ email: `missing-name-${uid()}@t.test`, password })).status, 400);
+  assert.equal((await api.post('/auth/register').send({ fullName: '   ', email: `blank-name-${uid()}@t.test`, password })).status, 400);
+  assert.equal((await api.post('/auth/login').send({ email, password: 'incorrect-password' })).status, 401);
+  const login = await api.post('/auth/login').send({ email, password });
+  assert.equal(login.status, 200);
+  assert.equal(login.body.user.fullName, fullName);
+  const auth = `Bearer ${login.body.token}`;
+  assert.equal((await api.get('/me').set('Authorization', auth)).body.role, 'holder');
+  assert.equal((await api.get('/me').set('Authorization', auth)).body.fullName, fullName);
+  const opened = await api.post('/accounts').set('Authorization', auth).send({ name: 'Onboarding account' });
+  assert.equal(opened.status, 201);
+  assert.equal(opened.body.ownerId, registered.body.user.id);
+  const expired = jwt.sign({ sub: String(registered.body.user.id) }, process.env.JWT_SECRET, { expiresIn: -1 });
+  assert.equal((await api.get('/me').set('Authorization', `Bearer ${expired}`)).status, 401);
+  assert.equal((await api.get('/me').set('Authorization', 'Bearer invalid-token')).status, 401);
+  assert.equal((await api.get('/admin/users')).status, 401);
+  assert.equal((await api.get('/admin/users').set('Authorization', `Bearer ${login.body.token}`)).status, 403);
+  assert.equal((await api.get('/admin/audit-events').set('Authorization', `Bearer ${login.body.token}`)).status, 403);
+  assert.equal((await api.post('/admin/users').send({ email: `noauth-${uid()}@t.test`, password: 'Long-Enough-Demo-Password-123', role: 'admin' })).status, 401);
+  assert.equal((await api.patch(`/admin/users/${registered.body.user.id}/status`).set('Authorization', auth).send({ active: false })).status, 403);
+  const listing = await api.get('/admin/users').set('Authorization', `Bearer ${admin.token}`);
+  assert.equal(listing.status, 200);
+  assert.ok(listing.body.some((user) => user.email === email && user.fullName === fullName && user.status === 'active'));
+  const events = await api.get('/admin/audit-events').set('Authorization', `Bearer ${admin.token}`);
+  assert.equal(events.status, 200);
+  assert.ok(events.body.some((event) => event.action === 'auth.register.completed' && event.targetId === String(registered.body.user.id)));
+  assert.ok(events.body.some((event) => event.action === 'account.created' && event.targetId === String(opened.body.id)));
+  const managedEmail = `managed-${uid()}@t.test`;
+  const managed = await api.post('/admin/users').set('Authorization', `Bearer ${admin.token}`).send({ email: managedEmail, password: 'Long-Enough-Demo-Password-123', role: 'holder' });
+  assert.equal(managed.status, 201);
+  assert.equal(managed.body.role, 'holder');
+  assert.equal((await api.patch(`/admin/users/${admin.id}/status`).set('Authorization', `Bearer ${admin.token}`).send({ active: false })).status, 422);
+  const disable = await api.patch(`/admin/users/${registered.body.user.id}/status`).set('Authorization', `Bearer ${admin.token}`).send({ active: false });
+  assert.equal(disable.status, 200);
+  assert.equal((await api.get('/me').set('Authorization', `Bearer ${login.body.token}`)).status, 401);
 });
 
 test('CONSERVATION: random concurrent transfers never change the total; ledger balances', async () => {
@@ -223,11 +286,18 @@ test('REFUSED attempts are recorded and appear on the statement; failure leaves 
 
 test('APPEND-ONLY: ledger rows cannot be updated, deleted or truncated (even by the app DB user)', async () => {
   const u = await mkUser('holder'); const a = await mkAccount(u); await fund(a, 100);
+  const movementEvent = (await pool.query("SELECT id FROM audit_events WHERE action='money.deposit' ORDER BY id DESC LIMIT 1")).rows[0];
+  assert.ok(movementEvent, 'successful movement is written to audit events');
   await assert.rejects(pool.query('UPDATE ledger_entries SET amount = 1 WHERE account_id = $1', [a]), /append-only/);
   await assert.rejects(pool.query('DELETE FROM ledger_entries WHERE account_id = $1', [a]), /append-only/);
   await assert.rejects(pool.query('UPDATE transactions SET amount = 1 WHERE to_account_id = $1', [a]), /append-only/);
   await assert.rejects(pool.query('DELETE FROM attempts'), /append-only/);
   await assert.rejects(pool.query('TRUNCATE ledger_entries CASCADE'), /append-only/);
+  const audit = (await pool.query('SELECT id FROM audit_events ORDER BY id DESC LIMIT 1')).rows[0];
+  assert.ok(audit);
+  await assert.rejects(pool.query('UPDATE audit_events SET action = $1 WHERE id = $2', ['changed', audit.id]), /append-only/);
+  await assert.rejects(pool.query('DELETE FROM audit_events WHERE id = $1', [audit.id]), /append-only/);
+  await assert.rejects(pool.query('TRUNCATE audit_events'), /append-only/);
 });
 
 test('DB BACKSTOP: the database itself refuses a negative customer balance', async () => {

@@ -1,13 +1,26 @@
 'use strict';
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { pool } = require('./db');
 const { ApiError } = require('./errors');
 const { signToken, authenticate, requireRole } = require('./auth');
 const { postMovement, verifyLedger, MAX_AMOUNT } = require('./ledger');
+const { recordAudit } = require('./audit');
 
 const app = express();
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.set({
+    'Content-Security-Policy': "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'",
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  });
+  next();
+});
 app.use(express.json({ limit: '10kb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -35,16 +48,65 @@ function parseKey(req) {
 // ---------- auth ----------
 app.get('/health', wrap(async (req, res) => { await pool.query('SELECT 1'); res.json({ ok: true }); }));
 
-app.post('/auth/register', wrap(async (req, res) => {   // self-registration always creates a 'holder'
+// Distinct client-side pages, all served by this Express application and origin.
+app.get(['/signin', '/register', '/dashboard', '/admin', '/auditor'], (req, res) =>
+  res.sendFile(path.join(__dirname, '../public/index.html')));
+
+function validEmail(email) { return typeof email === 'string' && email.length <= 254 && /^\S+@\S+\.\S+$/.test(email); }
+function validPassword(password, minimum) {
+  return typeof password === 'string' && password.length >= minimum && Buffer.byteLength(password, 'utf8') <= 72;
+}
+function bootstrapSecretMatches(candidate) {
+  const expected = process.env.BOOTSTRAP_SECRET;
+  if (typeof expected !== 'string' || expected.length < 32 || typeof candidate !== 'string') return false;
+  const a = Buffer.from(expected); const b = Buffer.from(candidate);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+app.post('/auth/bootstrap-admin', wrap(async (req, res) => {
+  if (!bootstrapSecretMatches(req.get('X-Bootstrap-Secret'))) {
+    await recordAudit('auth.bootstrap.refused');
+    throw new ApiError(403, 'BOOTSTRAP_UNAVAILABLE', 'Administrator initialization is unavailable');
+  }
   const { email, password } = req.body || {};
-  if (typeof email !== 'string' || !/^\S+@\S+\.\S+$/.test(email) || typeof password !== 'string' || password.length < 8) {
-    throw new ApiError(400, 'VALIDATION', 'Valid email and a password of at least 8 characters required');
+  if (!validEmail(email) || !validPassword(password, 12)) {
+    throw new ApiError(400, 'VALIDATION', 'Valid email and a password of at least 12 characters (maximum 72 UTF-8 bytes) required');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [78120419]);
+    const exists = await client.query("SELECT 1 FROM users WHERE role='admin' LIMIT 1");
+    if (exists.rowCount) {
+      await client.query('ROLLBACK');
+      await recordAudit('auth.bootstrap.refused');
+      throw new ApiError(409, 'BOOTSTRAP_COMPLETE', 'Administrator initialization is already complete');
+    }
+    const created = (await client.query(
+      "INSERT INTO users (email, password_hash, role) VALUES ($1,$2,'admin') RETURNING id, email, role",
+      [email.toLowerCase(), await bcrypt.hash(password, 10)])).rows[0];
+    await client.query('COMMIT');
+    await recordAudit('auth.bootstrap.completed', created.id, created.id);
+    res.status(201).json({ user: created, token: signToken(created) });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (error.code === '23505') throw new ApiError(409, 'EMAIL_TAKEN', 'Email already registered');
+    throw error;
+  } finally { client.release(); }
+}));
+
+app.post('/auth/register', wrap(async (req, res) => {   // self-registration always creates a 'holder'
+  const { fullName, email, password } = req.body || {};
+  if (typeof fullName !== 'string' || !fullName.trim() || fullName.trim().length > 80 ||
+      !validEmail(email) || !validPassword(password, 8)) {
+    throw new ApiError(400, 'VALIDATION', 'Full name (max 80 characters), valid email, and a password of at least 8 characters (maximum 72 UTF-8 bytes) required');
   }
   try {
     const r = await pool.query(
-      "INSERT INTO users (email, password_hash, role) VALUES ($1,$2,'holder') RETURNING id, email, role",
-      [email.toLowerCase(), await bcrypt.hash(password, 10)]);
-    res.status(201).json({ user: r.rows[0], token: signToken(r.rows[0]) });
+      "INSERT INTO users (full_name, email, password_hash, role) VALUES ($1,$2,$3,'holder') RETURNING id, email, role, full_name AS \"fullName\"",
+      [fullName.trim(), email.toLowerCase(), await bcrypt.hash(password, 10)]);
+    await recordAudit('auth.register.completed', r.rows[0].id, r.rows[0].id);
+    res.status(201).json({ user: r.rows[0], message: 'Registration successful. Please sign in.' });
   } catch (e) {
     if (e.code === '23505') throw new ApiError(409, 'EMAIL_TAKEN', 'Email already registered');
     throw e;
@@ -55,13 +117,60 @@ const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 10);
 app.post('/auth/login', wrap(async (req, res) => {
   const { email, password } = req.body || {};
   if (typeof email !== 'string' || typeof password !== 'string') throw new ApiError(400, 'VALIDATION', 'email and password required');
-  const u = (await pool.query('SELECT id, email, role, password_hash FROM users WHERE email = $1', [email.toLowerCase()])).rows[0];
+  const u = (await pool.query('SELECT id, email, role, full_name AS \"fullName\", password_hash, is_active FROM users WHERE email = $1', [email.toLowerCase()])).rows[0];
   const ok = await bcrypt.compare(password, u ? u.password_hash : DUMMY_HASH);
-  if (!u || !ok) throw new ApiError(401, 'BAD_CREDENTIALS', 'Invalid email or password');
-  res.json({ user: { id: u.id, email: u.email, role: u.role }, token: signToken(u) });
+  if (!u || !ok || !u.is_active) {
+    await recordAudit('auth.login.failed', null, typeof email === 'string' ? email.toLowerCase() : null);
+    throw new ApiError(401, 'BAD_CREDENTIALS', 'Invalid email or password');
+  }
+  await recordAudit('auth.login.succeeded', u.id, u.id);
+  res.json({ user: { id: u.id, email: u.email, fullName: u.fullName, role: u.role }, token: signToken(u) });
 }));
 
 app.get('/me', authenticate, (req, res) => res.json(req.user));
+
+app.get('/admin/users', authenticate, requireRole('admin'), wrap(async (req, res) => {
+  const result = await pool.query('SELECT id, email, full_name AS "fullName", role, is_active, created_at FROM users ORDER BY id DESC LIMIT 500');
+  res.json(result.rows.map((u) => ({ id: u.id, fullName: u.fullName, email: u.email, role: u.role, status: u.is_active ? 'active' : 'disabled', createdAt: u.created_at })));
+}));
+
+app.post('/admin/users', authenticate, requireRole('admin'), wrap(async (req, res) => {
+  const { email, password, role } = req.body || {};
+  if (!validEmail(email) || !validPassword(password, 12) || !['admin', 'holder', 'auditor'].includes(role)) {
+    throw new ApiError(400, 'VALIDATION', 'Valid email, a password of at least 12 characters (maximum 72 UTF-8 bytes), and a supported role required');
+  }
+  try {
+    const user = (await pool.query('INSERT INTO users (email, password_hash, role) VALUES ($1,$2,$3) RETURNING id,email,role,is_active,created_at',
+      [email.toLowerCase(), await bcrypt.hash(password, 10), role])).rows[0];
+    await recordAudit('admin.user.created', req.user.id, user.id, { role });
+    res.status(201).json({ id: user.id, email: user.email, role: user.role, status: 'active', createdAt: user.created_at });
+  } catch (error) {
+    if (error.code === '23505') throw new ApiError(409, 'EMAIL_TAKEN', 'Email already registered');
+    throw error;
+  }
+}));
+
+app.patch('/admin/users/:id/status', authenticate, requireRole('admin'), wrap(async (req, res) => {
+  const id = parseId(req.params.id);
+  if (typeof req.body?.active !== 'boolean') throw new ApiError(400, 'VALIDATION', 'active must be a boolean');
+  if (id === req.user.id && !req.body.active) throw new ApiError(422, 'VALIDATION', 'Administrators cannot disable their own account');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [78120419]);
+    const target = (await client.query('SELECT id, role FROM users WHERE id=$1 FOR UPDATE', [id])).rows[0];
+    if (!target) throw new ApiError(404, 'USER_NOT_FOUND', 'User not found');
+    if (!req.body.active && target.role === 'admin') {
+      const count = Number((await client.query("SELECT count(*)::int AS n FROM users WHERE role='admin' AND is_active=true")).rows[0].n);
+      if (count <= 1) throw new ApiError(422, 'LAST_ADMIN', 'The last active administrator cannot be disabled');
+    }
+    const updated = (await client.query('UPDATE users SET is_active=$1 WHERE id=$2 RETURNING id,email,role,is_active,created_at', [req.body.active, id])).rows[0];
+    await client.query('COMMIT');
+    await recordAudit('admin.user.status_changed', req.user.id, id, { active: req.body.active });
+    res.json({ id: updated.id, email: updated.email, role: updated.role, status: updated.is_active ? 'active' : 'disabled', createdAt: updated.created_at });
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+  finally { client.release(); }
+}));
 
 // ---------- accounts ----------
 async function loadAccountFor(user, idParam) {
@@ -84,6 +193,7 @@ app.post('/accounts', authenticate, requireRole('admin', 'holder'), wrap(async (
   }
   const r = await pool.query(
     "INSERT INTO accounts (owner_id, name) VALUES ($1,$2) RETURNING id, owner_id, name, kind, balance", [ownerId, name.trim()]);
+  await recordAudit('account.created', req.user.id, r.rows[0].id, { ownerId });
   res.status(201).json(shape(r.rows[0]));
 }));
 
@@ -162,13 +272,22 @@ app.get('/audit/attempts', authenticate, requireRole('admin', 'auditor'), wrap(a
   res.json(r.rows);
 }));
 
+app.get('/admin/audit-events', authenticate, requireRole('admin'), wrap(async (req, res) => {
+  const rows = await pool.query(
+    `SELECT a.id, a.action, a.actor_id, actor.email AS actor_email, a.target_id, a.details, a.created_at
+       FROM audit_events a LEFT JOIN users actor ON actor.id=a.actor_id
+      ORDER BY a.id DESC LIMIT 200`);
+  res.json(rows.rows.map((row) => ({ id: row.id, action: row.action, actor: row.actor_id ? { id: row.actor_id, email: row.actor_email } : null,
+    targetId: row.target_id, details: row.details, at: row.created_at })));
+}));
+
 // ---------- errors ----------
 app.use((req, res, next) => next(new ApiError(404, 'NOT_FOUND', 'Route not found')));
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   if (err instanceof ApiError) return res.status(err.status).json({ error: { code: err.code, message: err.message } });
   if (err.type === 'entity.parse.failed') return res.status(400).json({ error: { code: 'VALIDATION', message: 'Invalid JSON' } });
   if (err.type === 'entity.too.large') return res.status(413).json({ error: { code: 'TOO_LARGE', message: 'Body too large' } });
-  console.error(err); // never leak internals to the client
+  console.error(JSON.stringify({ level: 'error', event: 'http.request_failed', error: err.name || 'Error', code: err.code || 'INTERNAL' }));
   res.status(500).json({ error: { code: 'INTERNAL', message: 'Internal error' } });
 });
 
