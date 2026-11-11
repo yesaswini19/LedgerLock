@@ -10,6 +10,21 @@ URL:https://ledgerlock-4yx2.onrender.com/
 
 Alice and Bob receive opening balances when the seed script runs. Anyone can register as a holder through the Register screen or `POST /auth/register`; public registration ignores any supplied role.
 
+## Demo Login Credentials
+
+| Role           | Email                                                     | Password      |
+| -------------- | --------------------------------------------------------- | ------------- |
+| Admin          | [admin@ledgerline.test](mailto:admin@ledgerline.test)     | Admin@12345   |
+| Holder (Alice) | [alice@ledgerline.test](mailto:alice@ledgerline.test)     | Alice@12345   |
+| Holder (Bob)   | [bob@ledgerline.test](mailto:bob@ledgerline.test)         | Bob@12345     |
+| Auditor        | [auditor@ledgerline.test](mailto:auditor@ledgerline.test) | Auditor@12345 |
+
+- These credentials are intended only for evaluating the demonstration application.
+- They work only if the corresponding accounts have been provisioned in the live demo database.
+- All data is synthetic demonstration data.
+- Do not use these credentials for personal accounts or real financial transactions.
+- Since these are shared demo credentials, other visitors may also access the accounts and modify demonstration data.
+
 ## Requirements
 
 - Node.js 20 or newer
