@@ -195,7 +195,7 @@
         </div>
         <button id="login-button" class="button button-primary" type="submit">Sign in</button>
       </form>
-      <p class="login-hint">Your account is protected with secure, encrypted access.</p>
+      <p class="login-hint">Sign in to view your accounts and recent activity.</p>
     </section>
   </main>
 
@@ -448,15 +448,18 @@
       const source = $('a1');
       const previous = source.value;
       source.replaceChildren();
-      for (const account of accountsList) {
+      const sourceAccounts = activeMove === 'deposit'
+        ? accountsList.filter((account) => account.kind !== 'external')
+        : accountsList;
+      for (const account of sourceAccounts) {
         const option = document.createElement('option');
         option.value = account.id;
         option.textContent = `${account.name} · #${account.id} · ${money(account.balance)}`;
         source.appendChild(option);
       }
-      if (accountsList.some((account) => String(account.id) === previous)) source.value = previous;
-      source.disabled = accountsList.length === 0;
-      $('move-submit').disabled = accountsList.length === 0;
+      if (sourceAccounts.some((account) => String(account.id) === previous)) source.value = previous;
+      source.disabled = sourceAccounts.length === 0;
+      $('move-submit').disabled = sourceAccounts.length === 0;
     }
     async function stmt(id) {
       showNotice($('msg'), '');
